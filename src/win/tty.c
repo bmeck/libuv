@@ -1246,6 +1246,79 @@ static int uv_tty_set_style(uv_tty_t* handle, DWORD* error) {
   return 0;
 }
 
+static int uv_tty_report_cursor(uv_tty_t* handle,
+    DWORD* error) {
+  CONSOLE_SCREEN_BUFFER_INFO info;
+
+  if (*error != ERROR_SUCCESS) {
+    return -1;
+  }
+
+  if (!GetConsoleScreenBufferInfo(handle->handle, &info)) {
+    *error = GetLastError();
+    return -1;
+  }
+  
+  // determine size of buffer we are going to print
+  size_t char_count = _snprintf(
+    NULL,
+    0,
+    "\x1b[%d;%dR",
+    info.dwCursorPosition.x,
+    info.dwCursorPosition.y
+  );
+  if (char_count == -1) {
+    *error = GetLastError();
+    return -1;
+  }
+  
+  // fill our buffer
+  unsigned char string_buffer[char_count+1];
+  size_t error = _snprintf(
+    string_buffer,
+    char_count,
+    "\x1b[%d;%dR",
+    info.dwCursorPosition.x,
+    info.dwCursorPosition.y
+  );
+  if (error == -1) {
+    *error = GetLastError();
+    return -1;
+  }
+  
+  // we need to generate key down and up events for each character
+  size_t record_count = char_count * 2;
+  INPUT_RECORD records[record_count];
+  
+  for (size_t i = 0; i < char_count; i++) {
+    unsigned char c = string_buffer[i];
+    SHORT shift_and_vk = VkKeyScanA(c);
+    CHAR vk = shift_and_vk & 0xff;
+    UINT vsc = MapVirtualKey(vk, MAPVK_VK_TO_VSC);
+    
+    size_t index = i*2;
+    
+    INPUT_RECORD input_record;
+    records[index].EventType = KEY_EVENT;
+    records[index].KeyEvent.bKeyDown = TRUE;
+    records[index].KeyEvent.wRepeatCount = 1;
+    records[index].KeyEvent.AsciiChar = c;
+    records[index].KeyEvent.dwControlKeyState = 0;
+    records[index].KeyEvent.wVirtualKeyCode = vk;
+    records[index].KeyEvent.wVirtualScanCode = vsc;
+    
+    records[index+1] = records[index];
+    records[index+1].KeyEvent.bKeyDown = FALSE;
+  }
+  
+  DWORD dwTmp;
+  if (!WriteConsoleInput(handle->handle, records, record_count, &dwTmp)) {
+    *error = GetLastError();
+    return -1;
+  }
+  
+  return 0;
+}
 
 static int uv_tty_save_state(uv_tty_t* handle, unsigned char save_attributes,
     DWORD* error) {
@@ -1616,6 +1689,12 @@ static int uv_tty_write_bufs(uv_tty_t* handle,
                 /* Set style */
                 FLUSH_TEXT();
                 uv_tty_set_style(handle, error);
+                break;
+              
+              case 'n':
+                /* Report cursor position */
+                FLUSH_TEXT();
+                uv_tty_report_cursor(handle, error);
                 break;
 
               case 's':
